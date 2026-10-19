@@ -224,17 +224,71 @@ Start=BravePortable.exe
 ''', encoding='utf-8')
 
 
+def find_signtool() -> Path:
+    """Locate Microsoft SDK SignTool on a GitHub-hosted Windows runner.
+
+    The SDK version changes across windows-latest images, so never hard-code
+    one Windows Kits build number or assume signtool.exe is on PATH.
+    """
+    explicit = os.environ.get('BRAVE_SIGNTOOL_PATH', '')
+    if explicit:
+        custom = Path(explicit)
+        if not custom.is_file():
+            raise RuntimeError(f'BRAVE_SIGNTOOL_PATH does not exist: {custom}')
+        return custom
+    on_path = shutil.which('signtool.exe') or shutil.which('signtool')
+    if on_path:
+        return Path(on_path)
+    bases = []
+    for var in ('ProgramFiles(x86)', 'ProgramFiles'):
+        if os.environ.get(var):
+            bases.append(Path(os.environ[var]) / 'Windows Kits' / '10' / 'bin')
+    # Conventional path for the SDK on GitHub-hosted Windows runners.
+    bases.append(Path('C:/Program Files (x86)/Windows Kits/10/bin'))
+    candidates = []
+    for base in bases:
+        if base.is_dir():
+            candidates.extend(base.glob('*/x64/signtool.exe'))
+            candidates.extend(base.glob('x64/signtool.exe'))
+    candidates = [p for p in candidates if p.is_file()]
+    if not candidates:
+        raise RuntimeError('Microsoft SignTool not found. The Windows SDK is required '
+                           'to verify Brave signing; refusing an unchecked build.')
+
+    def version_of(path: Path):
+        return tuple(int(x) for x in re.findall(r'\d+', path.parent.parent.name))
+    return max(candidates, key=version_of)
+
+
 def verify_signature(app_exe: Path):
+    """Fail closed: require a trusted Authenticode signature from Brave Software.
+
+    SignTool is the Microsoft SDK verifier and does not depend on the broken
+    Windows PowerShell Microsoft.PowerShell.Security module autoload observed
+    on the original runner. SHA-256 of the *archive* was already checked.
+    """
     if os.name != 'nt':
         raise RuntimeError('Authenticode verification requires Windows.')
-    path = str(app_exe).replace("'", "''")
-    ps = (
-        "$s=Get-AuthenticodeSignature -LiteralPath '" + path + "'; "
-        "if ($s.Status -ne 'Valid') {throw \"Invalid Brave executable signature: $($s.Status)\"}; "
-        "if ($s.SignerCertificate.Subject -notmatch 'Brave Software') {throw \"Unexpected Brave executable publisher: $($s.SignerCertificate.Subject)\"}; "
-        "Write-Host $s.SignerCertificate.Subject"
+    tool = find_signtool()
+    result = subprocess.run(
+        [str(tool), 'verify', '/pa', '/v', str(app_exe)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding='utf-8', errors='replace', check=False,
     )
-    subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', ps], check=True)
+    output = result.stdout or ''
+    if result.returncode != 0:
+        raise RuntimeError('Brave executable signature was not trusted or could not '
+                           f'be verified by Microsoft SignTool (exit {result.returncode}):\n'
+                           + output[-2500:])
+    # SignTool's verbose English output includes the certificate's subject.
+    # An unexpected signer is a hard failure; successful chain validation alone
+    # is not enough to accept a different software publisher.
+    if not re.search(r'^\s*Issued to:\s*Brave Software(?:,? Inc\.?)?\s*$',
+                     output, re.IGNORECASE | re.MULTILINE):
+        raise RuntimeError('Verified signature, but the expected Brave Software '
+                           'publisher was not present in the signer certificate. '
+                           'Refusing the package. SignTool output:\n' + output[-2500:])
+    print('Official Brave executable signature verified with Microsoft SignTool.', flush=True)
 
 
 def build(root: Path, version: str):
