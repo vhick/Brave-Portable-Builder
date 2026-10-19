@@ -44,7 +44,8 @@ static class BravePortable
         string root = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         string app = Path.Combine(root, @"App\Brave");
         string exe = Path.Combine(app, "brave.exe");
-        string profile = Path.Combine(root, @"Data\Profile");
+        string profile = Path.Combine(root, @"Data\User Data");
+        string legacyProfile = Path.Combine(root, @"Data\Profile");
         string cache = Path.Combine(root, @"Data\Cache");
         string temp = Path.Combine(root, @"Data\Temp");
 
@@ -55,6 +56,23 @@ static class BravePortable
                 MessageBox.Show("Cannot find App\\Brave\\brave.exe. Re-extract the complete ZIP.",
                                 "Brave Portable", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 2;
+            }
+
+            // Do not silently start with a fresh profile if an older build has data.
+            // Let the user close Brave, back up Data, and rename Profile -> User Data.
+            bool legacyHasData = Directory.Exists(legacyProfile) &&
+                                 Directory.GetFileSystemEntries(legacyProfile).Length > 0;
+            bool newHasData = Directory.Exists(profile) &&
+                              Directory.GetFileSystemEntries(profile).Length > 0;
+            if (legacyHasData && !newHasData)
+            {
+                MessageBox.Show(
+                    "Existing Brave browsing data was detected in Data\\Profile.\n\n" +
+                    "Please close every Brave window, back up the complete Data folder, " +
+                    "then rename Data\\Profile to Data\\User Data.\n\n" +
+                    "Your existing profile was not changed.",
+                    "Brave Portable - Profile folder update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return 5;
             }
 
             Directory.CreateDirectory(profile);

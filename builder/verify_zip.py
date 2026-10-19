@@ -18,6 +18,8 @@ def verify(path: Path):
             'BravePortable/Data/README.txt',
             'BravePortable/Other/buildinfo.txt',
         ]
+        if any(x.startswith('BravePortable/Data/Profile/') for x in names):
+            raise RuntimeError('Old Data/Profile layout detected; expected Data/User Data')
         missing = [x for x in required if x not in names]
         if missing:
             raise RuntimeError('Missing required package files: ' + ', '.join(missing))

@@ -325,7 +325,7 @@ def build(root: Path, version: str):
     compile_icon_pngs(ico, appinfo)
     write_appinfo(appinfo / 'appinfo.ini', version)
 
-    for folder in ['Profile', 'Cache', 'Temp', 'Downloads']:
+    for folder in ['User Data', 'Cache', 'Temp', 'Downloads']:
         (stage / 'Data' / folder).mkdir(parents=True, exist_ok=True)
     (stage / 'Data' / 'README.txt').write_text(
         'PRESERVE THIS FOLDER ON UPGRADES.\nYour Brave profile, bookmarks, extension data, browsing history and caches are stored here.\n'

@@ -4,6 +4,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 import zipfile
+from unittest.mock import patch
+from types import SimpleNamespace
 
 root = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('brave_build', root / 'builder' / 'build_portable.py')
@@ -94,10 +96,25 @@ class BraveBuilderTests(unittest.TestCase):
     def test_launcher_always_scopes_profile(self):
         code = (root / 'builder' / 'BravePortable.cs').read_text()
         self.assertIn('--user-data-dir=', code)
-        self.assertIn(r'Data\Profile', code)
+        self.assertIn(r'Data\User Data', code)
+        self.assertIn(r'Data\Profile', code)  # migration guard only
+        self.assertIn('legacyHasData && !newHasData', code)
         self.assertIn('--disk-cache-dir=', code)
         self.assertIn('Directory.CreateDirectory(profile)', code)
         self.assertNotIn('CryptUnprotectData', code)
+
+    def test_packager_stages_user_data_directory(self):
+        code = (root / 'builder' / 'build_portable.py').read_text()
+        self.assertIn("for folder in ['User Data', 'Cache', 'Temp', 'Downloads']:", code)
+        self.assertNotIn("for folder in ['Profile', 'Cache', 'Temp', 'Downloads']:", code)
+
+    def test_reject_legacy_profile_in_new_zip(self):
+        with TemporaryDirectory() as t:
+            p = Path(t) / 'legacy.zip'
+            with zipfile.ZipFile(p, 'w') as z:
+                z.writestr('BravePortable/Data/Profile/', '')
+            with self.assertRaisesRegex(RuntimeError, 'Old Data/Profile layout'):
+                verify.verify(p)
 
     def test_correct_zip_verification(self):
         with TemporaryDirectory() as t:
@@ -114,6 +131,46 @@ class BraveBuilderTests(unittest.TestCase):
                 z.writestr(prefix + 'Data/README.txt', 'Keep Data!')
                 z.writestr(prefix + 'Other/buildinfo.txt', 'Brave stable release')
             verify.verify(p)
+
+    def test_signature_success_uses_windows_sdk_and_checks_publisher(self):
+        fake = SimpleNamespace(returncode=0, stdout="""Signing Certificate Chain:
+   Issued to: Brave Software, Inc.
+   Issued by: Trusted Code Signing CA
+Successfully verified: brave.exe""")
+        with patch.object(build, 'os', SimpleNamespace(name='nt')), \
+             patch.object(build, 'find_signtool', return_value=Path('C:/sdk/signtool.exe')), \
+             patch.object(build.subprocess, 'run', return_value=fake) as run:
+            build.verify_signature(Path('D:/stage/brave.exe'))
+            self.assertEqual(run.call_args.args[0][1:4], ['verify', '/pa', '/v'])
+            self.assertNotIn('powershell.exe', run.call_args.args[0])
+
+    def test_signature_invalid_fails_closed(self):
+        fake = SimpleNamespace(returncode=1, stdout='Error: not digitally signed')
+        with patch.object(build, 'os', SimpleNamespace(name='nt')), \
+             patch.object(build, 'find_signtool', return_value=Path('C:/sdk/signtool.exe')), \
+             patch.object(build.subprocess, 'run', return_value=fake):
+            with self.assertRaisesRegex(RuntimeError, 'not trusted'):
+                build.verify_signature(Path('D:/stage/brave.exe'))
+
+    def test_signature_wrong_publisher_fails_closed(self):
+        fake = SimpleNamespace(returncode=0, stdout='Signing Certificate Chain:\n Issued to: Example Corp\nSuccessfully verified: brave.exe')
+        with patch.object(build, 'os', SimpleNamespace(name='nt')), \
+             patch.object(build, 'find_signtool', return_value=Path('C:/sdk/signtool.exe')), \
+             patch.object(build.subprocess, 'run', return_value=fake):
+            with self.assertRaisesRegex(RuntimeError, 'Brave Software'):
+                build.verify_signature(Path('D:/stage/brave.exe'))
+
+    def test_sign_tool_absent_fails_closed(self):
+        with patch.dict(build.os.environ, {}, clear=True), \
+             patch.object(build.shutil, 'which', return_value=None), \
+             patch.object(build.Path, 'is_dir', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, 'SignTool not found'):
+                build.find_signtool()
+
+    def test_signature_uses_sdk_not_powershell(self):
+        source = (root / 'builder' / 'build_portable.py').read_text()
+        self.assertIn("'verify', '/pa', '/v'", source)
+        self.assertNotIn("subprocess.run(['powershell.exe'", source)
 
     def test_workflow_is_manual_and_zip_only(self):
         workflow = (root / '.github/workflows/build-brave-portable.yml').read_text()
